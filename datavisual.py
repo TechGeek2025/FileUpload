@@ -65,11 +65,15 @@ SUPPORTED_DOCUMENT_FILES = {
 }
 
 # Request/Response models
-class VisualizationRequest(BaseModel):
+class FileVisualizationRequest(BaseModel):
     prompt: str
+    file_name: str
+    file_content: str  # base64 encoded
+    file_type: str  # MIME type from frontend
     session_id: Optional[str] = None
     analysis_type: Optional[str] = "comprehensive"  # basic, comprehensive, custom
-    chart_types: Optional[List[str]] = None  # specific chart types to create
+    use_case: Optional[str] = "auto"  # auto, chat, code_interpreter, both
+    chart_types: Optional[List[str]] = None  # specific chart types requested
 
 class VisualizationResponse(BaseModel):
     session_id: str
@@ -77,14 +81,13 @@ class VisualizationResponse(BaseModel):
     generated_files: List[dict]
     analysis_summary: dict
     execution_time: float
+    success: bool
 
-class FileAnalysisRequest(BaseModel):
-    prompt: str
-    file_name: str
-    file_content: str  # base64 encoded
-    file_type: Optional[str] = None
-    session_id: Optional[str] = None
-    use_case: Optional[str] = "auto"  # auto, chat, code_interpreter, both
+class GeneratedFile(BaseModel):
+    name: str
+    download_url: str
+    file_type: str  # image, data, document
+    size_bytes: int
 
 # Utility functions
 def refresh_credentials():
@@ -182,40 +185,77 @@ def get_mime_type(filename: str, provided_type: str = None) -> str:
     mime_type, _ = mimetypes.guess_type(filename)
     return mime_type or "application/octet-stream"
 
-def create_visualization_prompt(user_prompt: str, analysis_type: str, chart_types: List[str] = None) -> str:
-    """Create enhanced prompt for data visualization"""
+def create_visualization_prompt(user_prompt: str, analysis_type: str, chart_types: List[str] = None, file_name: str = None) -> str:
+    """Create enhanced prompt for data visualization based on file type and user request"""
     
-    base_prompts = {
-        "basic": """
-        Analyze this data and create basic visualizations:
-        1. Overview of the data structure
-        2. 2-3 key charts showing main trends
-        3. Brief summary of insights
-        """,
-        
-        "comprehensive": """
-        Perform comprehensive data analysis and visualization:
-        1. Data overview and quality assessment
-        2. Statistical summary of all numeric columns
-        3. Create multiple chart types: line charts, bar charts, histograms, correlation heatmap
-        4. Identify trends, patterns, and outliers
-        5. Generate insights and recommendations
-        6. Save all charts as high-quality PNG files
-        """,
-        
-        "custom": user_prompt
-    }
+    file_ext = os.path.splitext(file_name.lower())[1] if file_name else ""
     
-    prompt = base_prompts.get(analysis_type, base_prompts["comprehensive"])
+    # Determine if it's a data file that can be visualized
+    is_data_file = file_ext in SUPPORTED_DATA_FILES
     
-    if chart_types:
+    if analysis_type == "basic" and is_data_file:
+        base_prompt = f"""
+Analyze the uploaded file '{file_name}' and create basic visualizations:
+1. Read and understand the data structure
+2. Create 2-3 key charts showing main trends and patterns
+3. Provide a brief summary of insights
+
+User request: {user_prompt}
+"""
+    elif analysis_type == "comprehensive" and is_data_file:
+        base_prompt = f"""
+Perform comprehensive data analysis and visualization of '{file_name}':
+
+1. **Data Overview**: 
+   - Display first few rows and data structure
+   - Show data types and basic statistics
+   - Identify any data quality issues
+
+2. **Statistical Analysis**:
+   - Summary statistics for all numeric columns
+   - Distribution analysis
+   - Identify outliers and missing values
+
+3. **Visualizations** (save as high-quality PNG files):
+   - Trend analysis (line charts for time series data)
+   - Distribution charts (histograms, box plots)
+   - Comparison charts (bar charts, grouped comparisons)
+   - Correlation analysis (heatmap if multiple numeric columns)
+   - Any domain-specific charts based on data content
+
+4. **Insights & Recommendations**:
+   - Key findings and patterns
+   - Actionable insights
+   - Recommendations for further analysis
+
+User request: {user_prompt}
+
+Please use Python code to create professional, well-labeled charts with appropriate titles and legends.
+"""
+    elif analysis_type == "custom":
+        base_prompt = f"""
+Analyze the uploaded file '{file_name}' based on this specific request:
+
+{user_prompt}
+
+Please read the file first, then fulfill the user's specific requirements.
+"""
+    else:
+        # For non-data files or general analysis
+        base_prompt = f"""
+Analyze the uploaded file '{file_name}':
+
+{user_prompt}
+
+Please read and process the file content appropriately.
+"""
+    
+    # Add specific chart types if requested
+    if chart_types and is_data_file:
         chart_list = ", ".join(chart_types)
-        prompt += f"\n\nSpecific charts to create: {chart_list}"
+        base_prompt += f"\n\nAdditionally, make sure to create these specific chart types: {chart_list}"
     
-    if analysis_type != "custom":
-        prompt += f"\n\nUser request: {user_prompt}"
-    
-    return prompt
+    return base_prompt
 
 async def process_bedrock_response(response) -> dict:
     """Process streaming response from Bedrock"""
@@ -302,25 +342,29 @@ async def health_check():
             content={"status": "unhealthy", "error": str(e)}
         )
 
-@app.post("/visualize/file", response_model=VisualizationResponse)
-async def visualize_file(request: FileAnalysisRequest):
-    """Create visualizations from uploaded file"""
+@app.post("/visualize", response_model=VisualizationResponse)
+async def visualize_data(request: FileVisualizationRequest):
+    """Main endpoint: Create visualizations from base64 file data"""
     start_time = datetime.now()
     
     try:
         if not bedrock_client:
             refresh_credentials()
         
+        logger.info(f"Processing visualization request for file: {request.file_name}")
+        
         # Decode file content
         try:
             file_data = base64.b64decode(request.file_content)
         except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Invalid base64 file content: {e}")
+            raise HTTPException(status_code=400, detail=f"Invalid base64 file content: {str(e)}")
         
         # Validate file size
         is_valid, size_message = validate_file_size(file_data)
         if not is_valid:
             raise HTTPException(status_code=400, detail=size_message)
+        
+        logger.info(f"File size validation passed: {size_message}")
         
         # Determine use case
         if request.use_case == "auto":
@@ -328,15 +372,24 @@ async def visualize_file(request: FileAnalysisRequest):
         elif request.use_case == "both":
             use_cases = ["CHAT", "CODE_INTERPRETER"]
         else:
-            use_cases = [request.use_case.upper()]
+            use_cases = [request.use_case.upper().replace("CODE_INTERPRETER", "CODE_INTERPRETER")]
         
-        # Get MIME type
-        mime_type = get_mime_type(request.file_name, request.file_type)
+        logger.info(f"Determined use cases: {use_cases}")
+        
+        # Validate file type
+        file_ext = os.path.splitext(request.file_name.lower())[1]
+        if file_ext not in {**SUPPORTED_DATA_FILES, **SUPPORTED_DOCUMENT_FILES}:
+            logger.warning(f"Potentially unsupported file type: {file_ext}")
         
         # Create enhanced prompt for visualization
-        viz_prompt = create_visualization_prompt(request.prompt, "comprehensive")
+        viz_prompt = create_visualization_prompt(
+            request.prompt, 
+            request.analysis_type, 
+            request.chart_types,
+            request.file_name
+        )
         
-        # Build session state
+        # Build session state with files
         files_config = []
         for use_case in use_cases:
             files_config.append({
@@ -345,7 +398,7 @@ async def visualize_file(request: FileAnalysisRequest):
                     "sourceType": "BYTE_CONTENT",
                     "byteContent": {
                         "data": file_data,
-                        "mediaType": mime_type
+                        "mediaType": request.file_type
                     }
                 },
                 "useCase": use_case
@@ -353,7 +406,7 @@ async def visualize_file(request: FileAnalysisRequest):
         
         session_id = request.session_id or str(uuid.uuid4())
         
-        # Invoke Bedrock agent
+        # Prepare Bedrock agent request
         kwargs = {
             "agentId": AGENT_ID,
             "agentAliasId": AGENT_ALIAS_ID,
@@ -366,69 +419,90 @@ async def visualize_file(request: FileAnalysisRequest):
             }
         }
         
-        logger.info(f"Invoking Bedrock agent for file: {request.file_name}")
+        logger.info(f"Invoking Bedrock agent with session: {session_id}")
+        
+        # Invoke Bedrock agent
         response = bedrock_client.invoke_agent(**kwargs)
         
-        # Process response
+        # Process streaming response
         result = await process_bedrock_response(response)
         
         execution_time = (datetime.now() - start_time).total_seconds()
         
+        # Prepare file information for frontend
+        generated_files = []
+        for file_info in result['files']:
+            generated_files.append({
+                "name": file_info['name'],
+                "download_url": f"/files/{file_info['name']}",
+                "file_type": file_info['type'],
+                "size_bytes": file_info['size']
+            })
+        
+        logger.info(f"Analysis completed successfully in {execution_time:.2f}s. Generated {len(generated_files)} files.")
+        
         return VisualizationResponse(
             session_id=session_id,
             response_text=result['text'],
-            generated_files=result['files'],
+            generated_files=generated_files,
             analysis_summary={
                 "file_name": request.file_name,
-                "file_size_mb": len(file_data) / (1024 * 1024),
-                "mime_type": mime_type,
+                "file_size_mb": round(len(file_data) / (1024 * 1024), 2),
+                "mime_type": request.file_type,
                 "use_cases": use_cases,
-                "charts_generated": len([f for f in result['files'] if f['type'] == 'image'])
+                "charts_generated": len([f for f in result['files'] if f['type'] == 'image']),
+                "analysis_type": request.analysis_type,
+                "prompt_length": len(viz_prompt)
             },
-            execution_time=execution_time
+            execution_time=execution_time,
+            success=True
         )
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error in visualize_file: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error in visualize_data: {str(e)}")
+        execution_time = (datetime.now() - start_time).total_seconds()
+        
+        return VisualizationResponse(
+            session_id=request.session_id or "error",
+            response_text=f"Error occurred during analysis: {str(e)}",
+            generated_files=[],
+            analysis_summary={"error": str(e)},
+            execution_time=execution_time,
+            success=False
+        )
 
 @app.post("/visualize/upload")
-async def visualize_upload(
+async def visualize_upload_fallback(
     file: UploadFile = File(...),
     prompt: str = Form(...),
     analysis_type: str = Form(default="comprehensive"),
-    chart_types: str = Form(default=""),
     session_id: str = Form(default="")
 ):
-    """Upload file and create visualizations (multipart form)"""
+    """Fallback endpoint for multipart form uploads (converts to main endpoint)"""
     
     try:
-        # Read file content
+        # Read file content and convert to base64
         file_content = await file.read()
-        
-        # Convert to base64
         file_content_b64 = base64.b64encode(file_content).decode('utf-8')
         
-        # Parse chart types
-        chart_types_list = [ct.strip() for ct in chart_types.split(",")] if chart_types else None
-        
-        # Create request
-        request = FileAnalysisRequest(
+        # Create request for main endpoint
+        request = FileVisualizationRequest(
             prompt=prompt,
             file_name=file.filename,
             file_content=file_content_b64,
-            file_type=file.content_type,
+            file_type=file.content_type or "application/octet-stream",
             session_id=session_id or str(uuid.uuid4()),
+            analysis_type=analysis_type,
             use_case="auto"
         )
         
-        # Process visualization
-        return await visualize_file(request)
+        # Process through main endpoint
+        return await visualize_data(request)
         
     except Exception as e:
-        logger.error(f"Error in visualize_upload: {e}")
+        logger.error(f"Error in visualize_upload_fallback: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/files/{filename}")
