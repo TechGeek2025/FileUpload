@@ -14,6 +14,7 @@ interface FileUploadProps {
   currentFiles: UploadedFile[]; // Current files from parent
   maxSizePerFile?: number; // in bytes
   acceptedFileTypes?: string[];
+  disabled?: boolean; // Disable upload when true
 }
 
 const FileUpload: React.FC<FileUploadProps> = ({ 
@@ -31,7 +32,8 @@ const FileUpload: React.FC<FileUploadProps> = ({
     '.txt',
     '.rtf',
     '.csv'
-  ]
+  ],
+  disabled = false
 }) => {
   const [dragActive, setDragActive] = useState(false);
   const [error, setError] = useState<string>('');
@@ -56,51 +58,44 @@ const FileUpload: React.FC<FileUploadProps> = ({
     );
     
     if (!isValidDocument) {
-      return `File "${file.name}" is not a supported document type. Please upload PDF, Word, Excel, PowerPoint, or text files.`;
+             return `File "${file.name}" is not a supported document type. Please upload a PDF, Word, Excel, PowerPoint, or text file.`;
     }
     
     return null;
   };
 
   const processFiles = (files: FileList | File[]) => {
-    const newFiles: UploadedFile[] = [];
-    const errors: string[] = [];
+    if (disabled) return; // Don't process files if disabled
+    
+    const file = files[0]; // Only take the first file
+    if (!file) return;
 
-    Array.from(files).forEach(file => {
-      const validationError = validateFile(file);
-      if (validationError) {
-        errors.push(validationError);
-        return;
-      }
-
-      // Check if file already exists
-      const fileExists = currentFiles.some(f => f.name === file.name && f.size === file.size);
-      if (fileExists) {
-        errors.push(`File "${file.name}" is already uploaded`);
-        return;
-      }
-
-      const uploadedFile: UploadedFile = {
-        id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
-        file,
-        name: file.name,
-        size: file.size,
-        type: file.type
-      };
-      newFiles.push(uploadedFile);
-    });
-
-    if (errors.length > 0) {
-      setError(errors.join(', '));
+    // Check if a file is already uploaded
+    if (currentFiles.length > 0) {
+      setError('Please send the current message before uploading another file');
       setTimeout(() => setError(''), 5000);
-    } else {
-      setError('');
+      return;
     }
 
-    if (newFiles.length > 0) {
-      const updatedFiles = [...currentFiles, ...newFiles];
-      onFilesChange(updatedFiles);
+    const validationError = validateFile(file);
+    if (validationError) {
+      setError(validationError);
+      setTimeout(() => setError(''), 5000);
+      return;
     }
+
+    setError('');
+
+    const uploadedFile: UploadedFile = {
+      id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
+      file,
+      name: file.name,
+      size: file.size,
+      type: file.type
+    };
+
+    // Add the single file
+    onFilesChange([uploadedFile]);
   };
 
   const handleFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -114,6 +109,7 @@ const FileUpload: React.FC<FileUploadProps> = ({
   const handleDrag = (e: DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     e.stopPropagation();
+    if (disabled || currentFiles.length > 0) return; // Don't handle drag if disabled or file already uploaded
     if (e.type === 'dragenter' || e.type === 'dragover') {
       setDragActive(true);
     } else if (e.type === 'dragleave') {
@@ -126,12 +122,15 @@ const FileUpload: React.FC<FileUploadProps> = ({
     e.stopPropagation();
     setDragActive(false);
     
+    if (disabled || currentFiles.length > 0) return; // Don't handle drop if disabled or file already uploaded
+    
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
       processFiles(e.dataTransfer.files);
     }
   };
 
   const openFileDialog = () => {
+    if (disabled || currentFiles.length > 0) return; // Don't open if disabled or file already uploaded
     fileInputRef.current?.click();
   };
 
@@ -139,9 +138,10 @@ const FileUpload: React.FC<FileUploadProps> = ({
     <div className="file-upload-container">
       {/* Compact paperclip button */}
       <button
-        className="file-upload-btn"
+        className={`file-upload-btn ${disabled || currentFiles.length > 0 ? 'disabled' : ''}`}
         onClick={openFileDialog}
-        title="Attach documents"
+        title={disabled || currentFiles.length > 0 ? "Send message before uploading another file" : "Attach document"}
+        disabled={disabled || currentFiles.length > 0}
       >
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
           <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66L9.64 16.2a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
@@ -151,10 +151,10 @@ const FileUpload: React.FC<FileUploadProps> = ({
       <input
         ref={fileInputRef}
         type="file"
-        multiple
         onChange={handleFileInput}
         className="file-input-hidden"
         accept={acceptedFileTypes.join(',')}
+        disabled={disabled || currentFiles.length > 0}
       />
       
       {error && (
