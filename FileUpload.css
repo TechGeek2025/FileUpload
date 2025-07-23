@@ -23,6 +23,20 @@
   color: var(--color-primary);
 }
 
+.file-upload-btn.disabled,
+.file-upload-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.file-upload-btn.disabled:hover,
+.file-upload-btn:disabled:hover {
+  border-color: #bdbdbd;
+  background: none;
+  color: var(--color-secondary);
+}
+
 .file-input-hidden {
   display: none;
 }
@@ -71,6 +85,18 @@ body.dark .file-upload-btn:hover {
   border-color: var(--color-primary);
   background: #2a1a20;
   color: var(--color-primary);
+}
+
+body.dark .file-upload-btn.disabled,
+body.dark .file-upload-btn:disabled {
+  opacity: 0.4;
+}
+
+body.dark .file-upload-btn.disabled:hover,
+body.dark .file-upload-btn:disabled:hover {
+  border-color: #444;
+  background: none;
+  color: #ccc;
 }
 
 
